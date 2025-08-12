@@ -2,13 +2,32 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-require('dotenv').config();
-const authRoutes = require('./routes/auth.routes');
-const app = express();
 const cookieParser = require('cookie-parser');
+const listEndpoints = require('express-list-endpoints');
+require('dotenv').config();
 
-// Security middleware
+// Import routes
+const authRoutes = require('./routes/auth.routes');
+const userRoutes = require('./routes/user.routes');
+const patientRoutes = require('./routes/patient.routes');
+const doctorRoutes = require('./routes/doctor.routes');
+const prescriptionRoutes = require('./routes/prescription.routes');
+const AppointmentRoutes = require('./routes/appointment.routes');
+const analyticsRoutes = require('./routes/analytics.routes');
+const notificationsRoutes = require('./routes/notification.routes');
+
+
+// Import utilities
+const cleanExpiredTokens = require('./utils/cleanup');
+const Appointment = require('./models/appointment.model');
+
+const app = express();
+
+// ========================================
+// SECURITY MIDDLEWARE
+// ========================================
 app.use(helmet());
+
 app.use(cors({
     origin: process.env.FRONTEND_URL || 'http://localhost:3000',
     credentials: true
@@ -16,8 +35,8 @@ app.use(cors({
 
 // Rate limiting middleware
 const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 100,
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // limit each IP to 100 requests per windowMs
     message: {
         success: false,
         message: 'Too many requests from this IP, please try again later.'
@@ -25,17 +44,23 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Body parsers
+// ========================================
+// BODY PARSING MIDDLEWARE
+// ========================================
 app.use(express.json({ limit: '10mb' }));
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-app.use('/api/auth', authRoutes);
+// ========================================
+// BACKGROUND TASKS
+// ========================================
+// Clean expired tokens every 12 hours
+setInterval(cleanExpiredTokens, 12 * 60 * 60 * 1000);
 
-const listEndpoints = require('express-list-endpoints');
-console.log('Registered Endpoints:', listEndpoints(app));
-
-// Health check
+// ========================================
+// HEALTH CHECK ENDPOINT
+// ========================================
 app.get('/api/health', (req, res) => {
     res.json({
         status: 'OK',
@@ -43,22 +68,48 @@ app.get('/api/health', (req, res) => {
         service: 'MediKeep API'
     });
 });
+//errorhandler
+app.use(require('./middlewares/errorHandler'));
+// ========================================
+// API ROUTES
+// ========================================
+app.use('/api/auth', authRoutes);
+app.use('/api/user', userRoutes);
+app.use('/api/patients', patientRoutes);
+app.use('/api/doctor', doctorRoutes);
+app.use('/api/prescriptions', prescriptionRoutes);
+app.use('/api/appointments', AppointmentRoutes);
+app.use('/api/analytics', analyticsRoutes);
+app.use('/api/notifications', notificationsRoutes);
 
-// Error handler
+
+
+
+// ========================================
+// DEVELOPMENT UTILITIES
+// ========================================
+if (process.env.NODE_ENV === 'development') {
+    console.log('Registered Endpoints:', listEndpoints(app));
+}
+
+// ========================================
+// ERROR HANDLING MIDDLEWARE
+// ========================================
+// 404 fallback - must come before error handler
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        message: 'Endpoint not found'
+    });
+});
+
+// Global error handler - must be last
 app.use((err, req, res, next) => {
     console.error('Unhandled error:', err.stack);
     res.status(500).json({
         success: false,
         message: 'Internal server error',
         error: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
-});
-
-//  404 fallback
-app.use((req, res) => {
-    res.status(404).json({
-        success: false,
-        message: 'Endpoint not found'
     });
 });
 

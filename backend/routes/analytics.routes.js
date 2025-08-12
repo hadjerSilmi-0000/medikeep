@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const { giveAppointment } = require('../controllers/appointmentController');
+const analyticsController = require('../controllers/analytics.controller');
 const authenticate = require('../middlewares/authMiddleware');
 const checkRole = require('../middlewares/roleMiddleware');
 
-router.post('/give', authenticate, checkRole(['doctor']), giveAppointment);
+// Doctor-only analytics
+router.get('/doctor', authenticate, checkRole(['doctor']), analyticsController.getDoctorAnalytics);
 
 module.exports = router;
