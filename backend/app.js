@@ -16,7 +16,6 @@ const AppointmentRoutes = require('./routes/appointment.routes');
 const analyticsRoutes = require('./routes/analytics.routes');
 const notificationsRoutes = require('./routes/notification.routes');
 
-
 // Import utilities
 const cleanExpiredTokens = require('./utils/cleanup');
 const Appointment = require('./models/appointment.model');
@@ -68,8 +67,7 @@ app.get('/api/health', (req, res) => {
         service: 'MediKeep API'
     });
 });
-//errorhandler
-app.use(require('./middlewares/errorHandler'));
+
 // ========================================
 // API ROUTES
 // ========================================
@@ -82,9 +80,6 @@ app.use('/api/appointments', AppointmentRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 
-
-
-
 // ========================================
 // DEVELOPMENT UTILITIES
 // ========================================
@@ -93,7 +88,7 @@ if (process.env.NODE_ENV === 'development') {
 }
 
 // ========================================
-// ERROR HANDLING MIDDLEWARE
+// ERROR HANDLING MIDDLEWARE (MUST BE LAST!)
 // ========================================
 // 404 fallback - must come before error handler
 app.use((req, res) => {
@@ -103,7 +98,10 @@ app.use((req, res) => {
     });
 });
 
-// Global error handler - must be last
+// Error handler middleware - MOVED TO THE END
+app.use(require('./middlewares/errorHandler'));
+
+// Global error handler - must be absolute last
 app.use((err, req, res, next) => {
     console.error('Unhandled error:', err.stack);
     res.status(500).json({

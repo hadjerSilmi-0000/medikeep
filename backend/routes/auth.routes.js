@@ -1,32 +1,40 @@
 const express = require('express');
-const authController = require('../controllers/authController');
-const loginRateLimiter = require('../middlewares/rateLimiter');
-const authenticate = require('../middlewares/authMiddleware');
-const { registerValidation: authRegisterValidation, loginValidation } = require('../validations/authValidation');
-const { registerValidation, resetPasswordValidation } = require('../middlewares/validators');
 const router = express.Router();
 
-// Routes
-//signup route
-router.post('/register', registerValidation, authController.register);
-//login route
-router.post('/login', loginRateLimiter, loginValidation, authController.login);
-//Refresh Token route
-router.post('/refresh', authController.refreshToken);
+const authController = require('../controllers/authController');
+const {
+    loginRateLimiter,
+    registerRateLimiter,
+    forgotPasswordRateLimiter,
+    verifyEmailRateLimiter,
+    resetPasswordRateLimiter,
+    authRateLimiter,
+    refreshTokenRateLimiter
+} = require('../middlewares/rateLimiter');
+const { authenticate } = require('../middlewares/authMiddleware');
+const { registerValidation, loginValidation } = require('../validations/authValidation');
+const { sanitizeAuthInput, setSecurityHeaders } = require('../middlewares/sanitizer');
 
-router.get('/profile', authenticate, (req, res) => {
-    res.status(200).json({
-        success: true,
-        message: 'You are authenticated',
-        user: req.user,
-    });
-});
-//email verification 
-router.get('/verify/:token', authController.verifyEmail);
-//reset & forgot  password
-router.post('/forgot-password', authController.forgotPassword);
-router.post('/reset-password', authController.resetPassword);
-//logout route
-router.post('/logout', authenticate, authController.logout);
+
+//  Apply security middleware to all auth routes
+router.use(setSecurityHeaders);
+router.use(sanitizeAuthInput);
+
+// Registration
+router.post('/register', registerRateLimiter, registerValidation, authController.register);
+// Login
+router.post('/login', loginRateLimiter, loginValidation, authController.login);
+// Refresh token
+router.post('/refresh', refreshTokenRateLimiter, authController.refreshToken);
+// Profile
+router.get('/profile', authRateLimiter, authenticate, authController.getProfile);
+// Email verification
+router.get('/verify/:token', verifyEmailRateLimiter, authController.verifyEmail);
+// Forgot password
+router.post('/forgot-password', forgotPasswordRateLimiter, authController.forgotPassword);
+// Reset password
+router.post('/reset-password', resetPasswordRateLimiter, authController.resetPassword);
+// Logout
+router.post('/logout', authRateLimiter, authenticate, authController.logout);
 
 module.exports = router;

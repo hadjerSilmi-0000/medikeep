@@ -1,308 +1,263 @@
-const bcrypt = require('bcrypt');
-const crypto = require('crypto');
-const jwt = require('jsonwebtoken');
-const { v4: uuidv4 } = require('uuid');
-const { validationResult } = require('express-validator');
+const asyncWrapper = require('../utils/asyncWrapper');
+const authService = require('../services/authService');
 const db = require('../config/db');
-const { generateAccessToken, generateRefreshToken } = require('../utils/generateToken');
-const sendEmail = require('../utils/sendEmail');
-
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
 const authController = {
     // ---------------- REGISTER ------------------
-    register: async (req, res) => {
-        let connection;
-        try {
-            const errors = validationResult(req);
-            if (!errors.isEmpty()) {
-                return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
-            }
+    register: asyncWrapper(async (req, res, next) => {
+        const { name, email, password, role } = req.body;
 
-            const { name, email, password, role } = req.body;
-
-            const [existing] = await db.execute('SELECT id FROM users WHERE email = ?', [email]);
-            if (existing.length > 0) {
-                return res.status(409).json({ success: false, message: 'Email already in use' });
-            }
-
-            const hashedPassword = await bcrypt.hash(password, 12);
-            const verificationToken = crypto.randomBytes(32).toString('hex');
-            const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
-
-            connection = await db.getConnection();
-            await connection.beginTransaction();
-
-            const [result] = await connection.execute(
-                `INSERT INTO users 
-            (name, email, password, role, failed_login_attempts, locked_until, email_verified, verification_token, verification_expires) 
-            VALUES (?, ?, ?, ?, 0, NULL, 0, ?, ?)`,
-                [name, email, hashedPassword, role, verificationToken, verificationExpires]
-            );
-
-            const userId = result.insertId;
-
-            if (role === 'doctor') {
-                await connection.execute('INSERT INTO doctors (user_id) VALUES (?)', [userId]);
-            } else if (role === 'patient') {
-                await connection.execute('INSERT INTO patients (user_id) VALUES (?)', [userId]);
-            }
-
-            await connection.execute('INSERT INTO settings (user_id) VALUES (?)', [userId]);
-            await connection.commit();
-
-            // Send email
-            const verifyLink = `${FRONTEND_URL}/verify-email?token=${verificationToken}`;
-            await sendEmail(email, 'Verify your MediKeep account', `
-            <p>Hi ${name},</p>
-            <p>Thanks for registering. Please verify your email by clicking the link below:</p>
-            <a href="${verifyLink}">${verifyLink}</a>
-            <p>This link will expire in 24 hours.</p>
-        `);
-
-            res.status(201).json({
-                success: true,
-                message: 'User registered. Please verify your email.',
-                data: { userId, name, email, role }
+        // Check if email already exists
+        const emailExists = await authService.checkEmailExists(email);
+        if (emailExists) {
+            return res.status(409).json({
+                success: false,
+                message: 'Email already in use'
             });
-
-        } catch (err) {
-            if (connection) await connection.rollback();
-            console.error('Register Error:', err);
-            res.status(500).json({ success: false, message: 'Internal server error' });
-        } finally {
-            if (connection) connection.release();
         }
-    },
+
+        // Create user and get verification token
+        const { userId, verificationToken, userData } = await authService.createUser({
+            name, email, password, role
+        });
+
+        // Send verification email
+        await authService.sendVerificationEmail(email, name, verificationToken);
+
+        res.status(201).json({
+            success: true,
+            message: 'User registered. Please verify your email.',
+            data: userData
+        });
+    }),
 
     // ---------------- LOGIN ------------------
-    login: async (req, res) => {
+    login: asyncWrapper(async (req, res, next) => {
+        const { email, password } = req.body;
+
+        // Find user by email
+        const user = await authService.findUserByEmail(email);
+        if (!user) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid credentials'
+            });
+        }
+
+        // Check if account is locked
+        const lockStatus = authService.isAccountLocked(user);
+        if (lockStatus.locked) {
+            return res.status(403).json({
+                success: false,
+                message: `Account locked. Try again in ${lockStatus.minutesRemaining} min.`
+            });
+        }
+
+        // Validate password
+        const isPasswordValid = await authService.validatePassword(password, user.password);
+        if (!isPasswordValid) {
+            await authService.handleFailedLogin(user.id, user.failed_login_attempts);
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid credentials'
+            });
+        }
+
+        // Reset failed login attempts
+        await authService.resetFailedLoginAttempts(user.id);
+
+        // Check email verification
+        if (!user.email_verified) {
+            return res.status(403).json({
+                success: false,
+                message: 'Please verify your email first'
+            });
+        }
+
+        // Generate and store tokens
+        const { accessToken, refreshToken } = await authService.generateAndStoreTokens(user);
+
+        // Set secure cookies
+        authService.setAuthCookies(res, accessToken, refreshToken);
+
+        res.status(200).json({
+            success: true,
+            message: 'Login successful',
+            data: authService.getUserProfile(user)
+        });
+    }),
+
+    // ---------------- GET PROFILE ------------------
+    getProfile: asyncWrapper(async (req, res, next) => {
+        const userId = req.user.id;
+        const userRole = req.user.role;
+
+        // Since we have the user ID from JWT, we can fetch fresh user data
+        const [rows] = await db.execute(
+            'SELECT id, name, email, role, email_verified FROM users WHERE id = ?',
+            [userId]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        const user = rows[0];
+
+        res.status(200).json({
+            success: true,
+            message: 'Profile retrieved successfully',
+            data: {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                role: user.role,
+                emailVerified: user.email_verified
+            }
+        });
+    }),
+
+    // ---------------- REFRESH TOKEN ------------------
+    refreshToken: asyncWrapper(async (req, res, next) => {
+        const token = req.cookies.refreshToken;
+        if (!token) {
+            return res.status(401).json({
+                success: false,
+                message: 'Refresh token missing'
+            });
+        }
+
         try {
-            const errors = validationResult(req);
-            if (!errors.isEmpty()) {
-                return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
-            }
+            // Validate refresh token
+            const decoded = await authService.validateRefreshToken(token);
 
-            const { email, password } = req.body;
-            const [rows] = await db.execute('SELECT * FROM users WHERE email = ?', [email]);
+            // Generate new access token
+            const { token: newAccessToken } = authService.generateNewAccessToken(decoded.sub, decoded.role);
 
-            if (rows.length === 0) return res.status(401).json({ success: false, message: 'Invalid credentials' });
-
-            const user = rows[0];
-            const now = new Date();
-
-            if (user.locked_until && new Date(user.locked_until) > now) {
-                const mins = Math.ceil((new Date(user.locked_until) - now) / 60000);
-                return res.status(403).json({ success: false, message: `Account locked. Try again in ${mins} min.` });
-            }
-
-            const isMatch = await bcrypt.compare(password, user.password);
-            if (!isMatch) {
-                let attempts = user.failed_login_attempts + 1;
-                let lockedUntil = null;
-                if (attempts >= 5) {
-                    lockedUntil = new Date(Date.now() + 30 * 60 * 1000); // 30 min
-                    attempts = 0;
-                }
-                await db.execute('UPDATE users SET failed_login_attempts = ?, locked_until = ? WHERE id = ?', [attempts, lockedUntil, user.id]);
-                return res.status(401).json({ success: false, message: 'Invalid credentials' });
-            }
-
-            await db.execute('UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?', [user.id]);
-
-            const { token: accessToken, jti } = generateAccessToken(user.id, user.role);
-            const refreshToken = generateRefreshToken(user);
-
-            if (!user.email_verified) {
-                return res.status(403).json({ message: 'Please verify your email first' });
-            }
-
-            // Store refresh token
-            const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7d
-            await db.execute('INSERT INTO refresh_tokens (user_id, token, expires_at, created_at) VALUES (?, ?, ?, NOW())',
-                [user.id, refreshToken, expiresAt]);
-
-            res.cookie('accessToken', accessToken, {
+            // Set new access token cookie
+            const cookieOptions = {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === 'production',
                 sameSite: 'Strict',
                 maxAge: 30 * 60 * 1000,
-            });
+                path: '/',
+                domain: process.env.NODE_ENV === 'production' ? process.env.COOKIE_DOMAIN : undefined
+            };
 
-            res.cookie('refreshToken', refreshToken, {
-                httpOnly: true,
-                secure: process.env.NODE_ENV === 'production',
-                sameSite: 'Strict',
-                maxAge: 7 * 24 * 60 * 60 * 1000,
-            });
+            res.cookie('accessToken', newAccessToken, cookieOptions);
 
             res.status(200).json({
                 success: true,
-                message: 'Login successful',
-                data: { id: user.id, name: user.name, email: user.email, role: user.role },
+                message: 'Access token refreshed'
             });
 
-        } catch (err) {
-            console.error('Login error:', err);
-            res.status(500).json({ success: false, message: 'Internal server error' });
-        }
-    },
-
-    // ---------------- REFRESH TOKEN ------------------
-    refreshToken: async (req, res) => {
-        try {
-            const token = req.cookies.refreshToken;
-            if (!token) return res.status(401).json({ message: 'Refresh token missing' });
-
-            const decoded = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET);
-
-            const [tokens] = await db.execute(
-                'SELECT * FROM refresh_tokens WHERE user_id = ? AND token = ?',
-                [decoded.id, token]
-            );
-            const storedToken = tokens[0];
-
-            if (!storedToken || new Date(storedToken.expires_at) < new Date()) {
-                return res.status(403).json({ message: 'Refresh token invalid or expired' });
-            }
-
-            const { token: newAccessToken, jti } = generateAccessToken(decoded.id, decoded.role);
-
-            res.cookie('accessToken', newAccessToken, {
-                httpOnly: true,
-                secure: process.env.NODE_ENV === 'production',
-                sameSite: 'Strict',
-                maxAge: 30 * 60 * 1000,
+        } catch (error) {
+            return res.status(403).json({
+                success: false,
+                message: 'Refresh token invalid or expired'
             });
-
-            res.status(200).json({ message: 'Access token refreshed' });
-
-        } catch (err) {
-            console.error('Refresh token error:', err.message);
-            return res.status(403).json({ message: 'Invalid refresh token' });
         }
-    },
-    verifyEmail: async (req, res) => {
+    }),
+
+    // ---------------- VERIFY EMAIL ------------------
+    verifyEmail: asyncWrapper(async (req, res, next) => {
         const token = req.params.token;
 
         try {
-            const [rows] = await db.execute(
-                'SELECT id, verification_expires FROM users WHERE verification_token = ?',
-                [token]
-            );
+            // Verify email token
+            const user = await authService.verifyEmailToken(token);
 
-            if (rows.length === 0) {
-                return res.status(400).json({ success: false, message: 'Invalid or expired token' });
-            }
+            // Mark email as verified
+            await authService.markEmailAsVerified(user.id);
 
-            const user = rows[0];
-            if (new Date(user.verification_expires) < new Date()) {
-                return res.status(400).json({ success: false, message: 'Token has expired' });
-            }
+            return res.status(200).json({
+                success: true,
+                message: 'Email verified successfully'
+            });
 
-            await db.execute(
-                'UPDATE users SET email_verified = true, verification_token = NULL, verification_expires = NULL WHERE id = ?',
-                [user.id]
-            );
-
-            return res.status(200).json({ success: true, message: 'Email verified successfully' });
-        } catch (err) {
-            console.error('Email verification error:', err);
-            return res.status(500).json({ success: false, message: 'Internal server error' });
+        } catch (error) {
+            return res.status(400).json({
+                success: false,
+                message: error.message
+            });
         }
-    },
+    }),
 
+    // ---------------- FORGOT PASSWORD ------------------
+    forgotPassword: asyncWrapper(async (req, res, next) => {
+        const { email } = req.body;
 
-    forgotPassword: async (req, res) => {
+        // Find user by email
+        const user = await authService.findUserByEmail(email);
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'Email not found'
+            });
+        }
+
+        // Create password reset token
+        const resetToken = await authService.createPasswordResetToken(user.id);
+
+        // Send password reset email
+        await authService.sendPasswordResetEmail(email, resetToken);
+
+        res.json({
+            success: true,
+            message: 'Reset link sent to your email'
+        });
+    }),
+
+    // ---------------- RESET PASSWORD ------------------
+    resetPassword: asyncWrapper(async (req, res, next) => {
+        const { token, password } = req.body;
+
         try {
-            const { email } = req.body;
-            const [users] = await db.execute('SELECT id FROM users WHERE email = ?', [email]);
-            if (users.length === 0) {
-                return res.status(404).json({ success: false, message: 'Email not found' });
-            }
+            // Validate password reset token
+            const resetRecord = await authService.validatePasswordResetToken(token);
 
-            const userId = users[0].id;
-            const token = crypto.randomBytes(32).toString('hex');
-            const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+            // Update user password
+            await authService.updatePassword(resetRecord.user_id, password);
 
-            await db.execute(
-                'INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (?, ?, ?)',
-                [userId, token, expiresAt]
-            );
+            // Clean up password reset tokens
+            await authService.cleanupPasswordResetTokens(resetRecord.user_id);
 
-            const resetUrl = `http://localhost:3000/reset-password?token=${token}`;
-            await sendEmail(
-                email,
-                'Password Reset Request',
-                `
-        <p>Click the link below to reset your password. This link expires in 1 hour:</p>
-        <p><a href="${resetUrl}">${resetUrl}</a></p>
-        <p>If you did not request this, ignore this email.</p>
-    `
-            );
+            res.json({
+                success: true,
+                message: 'Password reset successful'
+            });
 
-
-            res.json({ success: true, message: 'Reset link sent to your email' });
-        } catch (err) {
-            console.error('Forgot password error:', err.message);
-            res.status(500).json({ success: false, message: 'Internal server error' });
+        } catch (error) {
+            return res.status(400).json({
+                success: false,
+                message: error.message
+            });
         }
-    },
-    resetPassword: async (req, res) => {
-        try {
-            const { token, password } = req.body;
-            const [records] = await db.execute(
-                'SELECT * FROM password_reset_tokens WHERE token = ? AND expires_at > NOW()',
-                [token]
-            );
-            if (records.length === 0) {
-                return res.status(400).json({ success: false, message: 'Token is invalid or expired' });
-            }
+    }),
 
-            const userId = records[0].user_id;
-            const hashedPassword = await bcrypt.hash(password, 12);
-            await db.execute('UPDATE users SET password = ? WHERE id = ?', [hashedPassword, userId]);
-            await db.execute('DELETE FROM password_reset_tokens WHERE user_id = ?', [userId]);
+    // ---------------- LOGOUT ------------------
+    logout: asyncWrapper(async (req, res, next) => {
+        const jti = req.user.jti;
+        const userId = req.user.id;
 
-            res.json({ success: true, message: 'Password reset successful' });
-        } catch (err) {
-            console.error('Reset password error:', err.message);
-            res.status(500).json({ success: false, message: 'Internal server error' });
-        }
-    },
-    logout: async (req, res) => {
-        try {
-            const jti = req.user.jti;
-            const userId = req.user.id;
+        // Blacklist current JWT token
+        await authService.blacklistToken(jti);
 
-            // Add jti to blacklist
-            const expiresAt = new Date(Date.now() + 30 * 60 * 1000); // same as access token expiry
-            await db.execute(
-                'INSERT INTO token_blacklist (jti, expires_at) VALUES (?, ?)',
-                [jti, expiresAt]
-            );
+        // Remove all refresh tokens for user
+        await authService.removeUserRefreshTokens(userId);
 
-            // Delete refresh token
-            await db.execute(
-                'DELETE FROM refresh_tokens WHERE user_id = ?',
-                [userId]
-            );
+        // Clear authentication cookies
+        authService.clearAuthCookies(res);
 
-            // Clear cookies
-            res.clearCookie('accessToken');
-            res.clearCookie('refreshToken');
-
-            console.log(`User ${userId} logged out. JTI blacklisted.`);
-            res.json({ success: true, message: 'Logged out successfully' });
-
-        } catch (err) {
-            console.error('Logout error:', err.message);
-            res.status(500).json({ success: false, message: 'Internal server error' });
-        }
-    },
-
-
-
+        console.log(`User ${userId} logged out. JTI blacklisted.`);
+        res.json({
+            success: true,
+            message: 'Logged out successfully'
+        });
+    })
 };
 
 module.exports = authController;

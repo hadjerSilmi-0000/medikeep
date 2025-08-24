@@ -4,179 +4,177 @@ const Appointment = require('../models/appointment.model');
 const Notification = require('../models/notification.model');
 const getDoctorIdFromUserId = require('../utils/getDoctorId');
 const PDFDocument = require('pdfkit');
+const prescriptionService = require('../services/prescriptionService');
+const {
+    createPrescriptionSchema,
+    updatePrescriptionSchema,
+    prescriptionParamsSchema
+} = require('../validations/prescriptionValidation');
 
-
-exports.getOwnPrescriptions = async (req, res) => {
+exports.getOwnPrescriptions = async (req, res, next) => {
     try {
-        const patientId = req.user.id;
+        const userId = req.user.id;
+        const { page = 1, limit = 10, sortBy = 'created_at', order = 'DESC' } = req.query;
 
-        const [prescriptions] = await db.execute(`
-            SELECT 
-                p.id,
-                p.medication,
-                p.dosage,
-                p.notes,
-                p.created_at,
-                u.name AS doctor_name
-            FROM prescriptions p
-            JOIN users u ON p.doctor_id = u.id
-            WHERE p.patient_id = ?
-            ORDER BY p.created_at DESC
-        `, [patientId]);
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+        const offset = (pageNum - 1) * limitNum;
 
-        res.json({ success: true, data: prescriptions });
+        // Validate sort parameters
+        const allowedSortFields = ['created_at', 'medication', 'doctor_name'];
+        const allowedOrder = ['ASC', 'DESC'];
+
+        const sortField = allowedSortFields.includes(sortBy) ? sortBy : 'created_at';
+        const sortOrder = allowedOrder.includes(order.toUpperCase()) ? order.toUpperCase() : 'DESC';
+
+        const result = await prescriptionService.getPatientPrescriptions(
+            userId,
+            { page: pageNum, limit: limitNum, sortBy: sortField, order: sortOrder }
+        );
+
+        res.json({
+            success: true,
+            data: result.prescriptions,
+            pagination: {
+                currentPage: pageNum,
+                totalPages: Math.ceil(result.total / limitNum),
+                totalItems: result.total,
+                itemsPerPage: limitNum
+            }
+        });
     } catch (err) {
         console.error('Get prescriptions error:', err.message);
-        res.status(500).json({ success: false, message: 'Internal server error' });
+        next(err);
     }
 };
 
-exports.addPrescription = async (req, res) => {
+exports.addPrescription = async (req, res, next) => {
     try {
-        const { appointment_id, medication, dosage, notes } = req.body;
-
-        if (!appointment_id || !medication || !dosage) {
-            return res.status(400).json({ success: false, message: "Required fields missing" });
-        }
-
-        // Map user → doctor
-        const doctorId = await getDoctorIdFromUserId(req.user.id);
-        if (!doctorId) {
-            return res.status(403).json({ success: false, message: "You are not a doctor" });
-        }
-
-        // Get appointment
-        const appointment = await Appointment.findById(appointment_id);
-        if (!appointment) {
-            return res.status(404).json({ success: false, message: "Appointment not found" });
-        }
-
-        // Check ownership
-        if (appointment.doctor_id !== doctorId) {
-            return res.status(403).json({ success: false, message: "Not your appointment" });
-        }
-
-        // Add prescription
-        const newPrescriptionId = await Prescription.create(
-            appointment_id,
-            doctorId,
-            appointment.patient_id,
-            medication,
-            dosage,
-            notes || ''
-        );
-
-        // Get doctor name
-        const [[doctorUser]] = await db.execute(
-            'SELECT name FROM users WHERE id = ?',
-            [req.user.id]
-        );
-        const doctorName = doctorUser ? doctorUser.name : 'Your Doctor';
-
-        // 📌 Create notification for patient
-        await Notification.create({
-            user_id: appointment.patient_user_id || (await getPatientUserId(appointment.patient_id)),
-            type: 'prescription',
-            title: 'New Prescription Added',
-            body: `Dr. ${doctorName} has added a new prescription for you.`,
-            data: { prescriptionId: newPrescriptionId }
-        });
-
-        res.status(201).json({ success: true, message: "Prescription added successfully" });
-
-    } catch (error) {
-        console.error("Error adding prescription:", error);
-        res.status(500).json({ success: false, message: "Server error" });
-    }
-};
-
-// EDIT Prescription
-exports.editPrescription = async (req, res) => {
-    try {
-        const { prescription_id } = req.params;
-        const { medication, dosage, notes } = req.body;
-
-        // 1️⃣ Map user → doctor
-        const doctorId = await getDoctorIdFromUserId(req.user.id);
-        if (!doctorId) {
-            return res.status(403).json({ success: false, message: "You are not a doctor" });
-        }
-
-        // 2️⃣ Find the prescription
-        const prescription = await Prescription.findById(prescription_id);
-        if (!prescription) {
-            return res.status(404).json({ success: false, message: "Prescription not found" });
-        }
-
-        // 3️⃣ Check doctor ownership
-        if (prescription.doctor_id !== doctorId) {
-            return res.status(403).json({
+        // Validate request body
+        const { error, value } = createPrescriptionSchema.validate(req.body);
+        if (error) {
+            return res.status(400).json({
                 success: false,
-                message: "You can only edit prescriptions you created"
+                message: 'Validation error',
+                errors: error.details.map(detail => detail.message)
             });
         }
 
-        // 4️⃣ Update prescription
-        await Prescription.update(prescription_id, medication, dosage, notes || '');
+        const { appointment_id, medication, dosage, notes } = value;
+        const userId = req.user.id;
+
+        const result = await prescriptionService.createPrescription(
+            userId,
+            appointment_id,
+            medication,
+            dosage,
+            notes
+        );
+
+        res.status(201).json({
+            success: true,
+            message: "Prescription added successfully",
+            data: { prescriptionId: result.prescriptionId }
+        });
+
+    } catch (error) {
+        console.error("Error adding prescription:", error);
+        next(error);
+    }
+};
+
+exports.editPrescription = async (req, res, next) => {
+    try {
+        // Validate params
+        const { error: paramsError, value: paramsValue } = prescriptionParamsSchema.validate(req.params);
+        if (paramsError) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid prescription ID'
+            });
+        }
+
+        // Validate request body
+        const { error: bodyError, value: bodyValue } = updatePrescriptionSchema.validate(req.body);
+        if (bodyError) {
+            return res.status(400).json({
+                success: false,
+                message: 'Validation error',
+                errors: bodyError.details.map(detail => detail.message)
+            });
+        }
+
+        const { prescription_id } = paramsValue;
+        const { medication, dosage, notes } = bodyValue;
+        const userId = req.user.id;
+
+        await prescriptionService.updatePrescription(
+            userId,
+            prescription_id,
+            medication,
+            dosage,
+            notes
+        );
 
         res.json({ success: true, message: "Prescription updated successfully" });
 
     } catch (error) {
         console.error("Error editing prescription:", error);
-        res.status(500).json({ success: false, message: "Server error" });
+        next(error);
     }
 };
 
-//  DELETE Prescription
-exports.deletePrescription = async (req, res) => {
+exports.deletePrescription = async (req, res, next) => {
     try {
-        const { prescription_id } = req.params;
-
-        // 1️⃣ Map user → doctor
-        const doctorId = await getDoctorIdFromUserId(req.user.id);
-        if (!doctorId) {
-            return res.status(403).json({ success: false, message: "You are not a doctor" });
-        }
-
-        // 2️⃣ Find the prescription
-        const prescription = await Prescription.findById(prescription_id);
-        if (!prescription) {
-            return res.status(404).json({ success: false, message: "Prescription not found" });
-        }
-
-        // 3️⃣ Check doctor ownership
-        if (prescription.doctor_id !== doctorId) {
-            return res.status(403).json({
+        // Validate params
+        const { error, value } = prescriptionParamsSchema.validate(req.params);
+        if (error) {
+            return res.status(400).json({
                 success: false,
-                message: "You can only delete prescriptions you created"
+                message: 'Invalid prescription ID'
             });
         }
 
-        // 4️⃣ Delete prescription
-        await Prescription.delete(prescription_id);
+        const { prescription_id } = value;
+        const userId = req.user.id;
+
+        await prescriptionService.deletePrescription(userId, prescription_id);
 
         res.json({ success: true, message: "Prescription deleted successfully" });
 
     } catch (error) {
         console.error("Error deleting prescription:", error);
-        res.status(500).json({ success: false, message: "Server error" });
+        next(error);
     }
 };
 
-exports.getPrescriptionPDF = async (req, res) => {
-    const prescriptionId = req.params.id;
-    const userId = req.user.sub; // from JWT
-    const role = req.user.role;
-
+exports.getPrescriptionPDF = async (req, res, next) => {
     try {
-        // Get prescription with doctor & patient user IDs
-        const [rows] = await db.query(`
+        // Validate params
+        const { error, value } = prescriptionParamsSchema.validate({ prescription_id: req.params.id });
+        if (error) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid prescription ID'
+            });
+        }
+
+        const prescriptionId = value.prescription_id;
+        const userId = req.user.sub;
+        const role = req.user.role;
+
+        // Get prescription with ownership check
+        const [rows] = await db.execute(`
             SELECT p.*, 
                    d.user_id AS doctor_user_id,
-                   pt.user_id AS patient_user_id
+                   pt.user_id AS patient_user_id,
+                   u.name AS doctor_name,
+                   up.name AS patient_name
             FROM prescriptions p
             JOIN doctors d ON p.doctor_id = d.id
             JOIN patients pt ON p.patient_id = pt.id
+            JOIN users u ON d.user_id = u.id
+            JOIN users up ON pt.user_id = up.id
             WHERE p.id = ?
         `, [prescriptionId]);
 
@@ -200,17 +198,22 @@ exports.getPrescriptionPDF = async (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename=prescription_${prescriptionId}.pdf`);
         doc.pipe(res);
 
-        doc.fontSize(18).text('Prescription', { align: 'center' });
+        doc.fontSize(18).text('Medical Prescription', { align: 'center' });
+        doc.moveDown();
+        doc.fontSize(12);
+        doc.text(`Doctor: ${prescription.doctor_name}`);
+        doc.text(`Patient: ${prescription.patient_name}`);
+        doc.text(`Date: ${new Date(prescription.created_at).toLocaleDateString()}`);
         doc.moveDown();
         doc.text(`Medication: ${prescription.medication}`);
         doc.text(`Dosage: ${prescription.dosage}`);
-        doc.text(`Notes: ${prescription.notes}`);
+        if (prescription.notes) {
+            doc.text(`Notes: ${prescription.notes}`);
+        }
         doc.end();
 
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ success: false, message: 'Server error' });
+        console.error('PDF generation error:', error);
+        next(error);
     }
 };
-
-
