@@ -1,4 +1,4 @@
-**# MediKeep
+## MediKeep
 
 > A full-stack healthcare management platform connecting doctors and patients through a clean, secure, and role-aware web application.
 
