@@ -1,0 +1,132 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    color: #404040;
+    background-color: #f0fdf4;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  input,
+  textarea,
+  select {
+    font-family: inherit;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white rounded-2xl shadow-card border border-primary-100 p-6;
+  }
+
+  .input-base {
+    @apply w-full border border-neutral-200 rounded-xl px-4 py-3 text-neutral-700 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-primary-300 focus:border-primary-400 transition-all duration-150 bg-white;
+  }
+
+  .btn-primary {
+    @apply bg-primary-600 hover:bg-primary-700 text-white rounded-xl px-6 py-3 font-semibold transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-primary-400 focus:ring-offset-2;
+  }
+
+  .btn-ghost {
+    @apply border border-primary-600 text-primary-600 hover:bg-primary-50 rounded-xl px-6 py-3 font-semibold transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-primary-400 focus:ring-offset-2;
+  }
+
+  .btn-danger {
+    @apply bg-red-50 hover:bg-red-100 text-danger border border-red-200 rounded-xl px-6 py-3 font-semibold transition-all duration-150;
+  }
+
+  .badge-pending {
+    @apply inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200;
+  }
+
+  .badge-confirmed {
+    @apply inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200;
+  }
+
+  .badge-completed {
+    @apply inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-primary-100 text-primary-700 border border-primary-200;
+  }
+
+  .badge-cancelled {
+    @apply inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-red-50 text-danger border border-red-200;
+  }
+
+  .sidebar-link {
+    @apply flex items-center gap-3 px-4 py-3 rounded-xl text-neutral-600 font-medium transition-all duration-150 hover:bg-primary-50 hover:text-primary-700;
+  }
+
+  .sidebar-link.active {
+    @apply bg-primary-100 text-primary-700;
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f0fdf4;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #bbf7d0;
+  border-radius: 99px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #86efac;
+}
+
+.auth-bg {
+  position: relative;
+  background-image: url('/authbg.jpg');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-color: #f0fdf4;
+}
+
+.input-sketch {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1.5px solid #9ca3af;
+  border-radius: 6px;
+  padding: 0.65rem 1rem;
+  font-size: 0.875rem;
+  color: #374151;
+  transition: border-color 0.15s ease;
+}
+
+.input-sketch::placeholder {
+  color: #9ca3af;
+}
+
+.input-sketch:focus {
+  outline: none;
+  border-color: #16a34a;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.auth-logo-badge {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #e8fdf0;
+  border: 1.5px solid #16a34a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
